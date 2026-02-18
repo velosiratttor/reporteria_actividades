@@ -3,22 +3,27 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import date
+import os
+
+os.environ.pop("HTTPS_PROXY", None)
+os.environ.pop("HTTP_PROXY", None)
+os.environ.pop("https_proxy", None)
+os.environ.pop("http_proxy", None)
 
 # =========================
 # Config
 # =========================
 SPREADSHEET_ID = "1ewnUoNHS9Dlk4TYz3psBiWFjARDFOSqWS81Ma5N97RI"
-SERVICE_JSON = "envio-487119-b8d305894e66.json"
 
-TAB_CT = "ct"   # debe existir EXACTO en tu Google Sheet
-TAB_CTP = "ctp" # debe existir EXACTO en tu Google Sheet
+TAB_CT = "ct"
+TAB_CTP = "ctp"
 
-CSV_ANALISTAS = "analistas.csv"   # columna esperada: analistas (o cambia abajo)
-CSV_CENTROS_CT = "centros.csv"    # columna esperada: centros (o cambia abajo)
-CSV_CENTROS_CTP = "ctp.csv"       # columna esperada: ctp (o cambia abajo)
-CSV_ACTIVIDADES= "actividades.csv" # columna esperada: actividades
-CSV_ACTIVIDADES_CTP= "actividades_ctp.csv"
-# Encabezados EXACTOS del Google Sheet (fila 1)
+CSV_ANALISTAS = "analistas.csv"
+CSV_CENTROS_CT = "centros.csv"
+CSV_CENTROS_CTP = "ctp.csv"
+CSV_ACTIVIDADES = "actividades.csv"
+CSV_ACTIVIDADES_CTP = "actividades_ctp.csv"
+
 SHEET_COLS = [
     "Especialista",
     "Fecha de recepcion",
@@ -62,7 +67,12 @@ def cargar_lista_csv(path: str, col: str) -> list[str]:
 @st.cache_resource
 def get_gspread_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file(SERVICE_JSON, scopes=scopes)
+
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=scopes
+    )
+
     return gspread.authorize(creds)
 
 
@@ -74,13 +84,11 @@ def subir_a_sheets(tab_name: str, filas: list[dict]):
     client = get_gspread_client()
     sh = client.open_by_key(SPREADSHEET_ID)
 
-    # Diagnóstico para evitar "Error: ct/ctp" sin explicación
     tabs = [ws.title for ws in sh.worksheets()]
     if tab_name not in tabs:
         raise ValueError(f"No existe la pestaña '{tab_name}'. Pestañas disponibles: {tabs}")
 
     ws = sh.worksheet(tab_name)
-
     values = [[f.get(c, "") for c in SHEET_COLS] for f in filas]
     ws.append_rows(values, value_input_option="USER_ENTERED")
 
@@ -94,17 +102,18 @@ if st.button("🔄 Recargar catálogos (CSV)"):
     st.cache_data.clear()
     st.rerun()
 
-# Catálogos (OJO: si tus columnas reales son 'nombre' y 'centro', cámbialas aquí)
 ANALISTAS = cargar_lista_csv(CSV_ANALISTAS, "analistas")
 CENTROS_CT = cargar_lista_csv(CSV_CENTROS_CT, "centros")
 CENTROS_CTP = cargar_lista_csv(CSV_CENTROS_CTP, "ctp")
-ACTIVIDADES=cargar_lista_csv(CSV_ACTIVIDADES,"actividades")
-ACTIVIDADES_CTP=cargar_lista_csv(CSV_ACTIVIDADES_CTP,"actividades_ctp")
+ACTIVIDADES = cargar_lista_csv(CSV_ACTIVIDADES, "actividades")
+ACTIVIDADES_CTP = cargar_lista_csv(CSV_ACTIVIDADES_CTP, "actividades_ctp")
+
 tipo_label = st.radio(
     "Tipo de centro",
     ["Centro Tecnológico (ct)", "Centro Privado (ctp)"],
     horizontal=True,
 )
+
 TAB_NAME = TAB_CT if tipo_label.startswith("Centro Tecnológico") else TAB_CTP
 centros_opciones = CENTROS_CT if TAB_NAME == TAB_CT else CENTROS_CTP
 actividades_opciones = ACTIVIDADES if TAB_NAME == TAB_CT else ACTIVIDADES_CTP
@@ -115,9 +124,6 @@ if state_key not in st.session_state:
 
 st.caption(f"📌 Se guardará en la hoja/pestaña: **{TAB_NAME}**")
 
-# =========================
-# Formulario
-# =========================
 with st.form("agregar"):
     especialista = st.selectbox("Especialista *", ANALISTAS)
 
@@ -129,19 +135,19 @@ with st.form("agregar"):
 
     centro_area = st.selectbox("Centro Tecnológico/Área Nivel Central *", centros_opciones)
     tipo_atencion = st.selectbox("TIPO DE ATENCION *", TIPOS_ATENCION)
-    solicitud = st.selectbox("Solicitud *",actividades_opciones)
+    solicitud = st.selectbox("Solicitud *", actividades_opciones)
 
     agregar = st.form_submit_button("Agregar a la tabla")
 
 if agregar:
     fila = {
         "Especialista": str(especialista).strip(),
-        "Fecha de recepcion": fecha_recep.isoformat(),  # SOLO FECHA
-        "Fecha de Atención": fecha_atn.isoformat(),     # SOLO FECHA
+        "Fecha de recepcion": fecha_recep.isoformat(),
+        "Fecha de Atención": fecha_atn.isoformat(),
         "Centro Tecnológico/Área Nivel Central": str(centro_area).strip(),
         "TIPO DE ATENCION": str(tipo_atencion).strip(),
         "Solicitud": str(solicitud).strip(),
-    }   
+    }
 
     if not fila_valida(fila):
         st.error("Todos los campos son obligatorios.")
@@ -151,9 +157,6 @@ if agregar:
 
 st.divider()
 
-# =========================
-# Tabla editable + Envío
-# =========================
 st.subheader(f"Vista previa editable ({TAB_NAME})")
 
 registros = st.session_state[state_key]
@@ -163,7 +166,6 @@ if not registros:
 
 df = pd.DataFrame(registros)
 
-# asegurar columnas y orden
 for c in SHEET_COLS:
     if c not in df.columns:
         df[c] = ""
@@ -184,7 +186,7 @@ with c1:
         invalidas = [i for i, r in enumerate(filas, start=1) if not fila_valida(r)]
 
         if invalidas:
-            st.error(f"Hay filas incompletas: {invalidas}. Completa todo antes de enviar.")
+            st.error(f"Hay filas incompletas: {invalidas}.")
         else:
             try:
                 subir_a_sheets(TAB_NAME, filas)
